@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+
+# Author: Erdem Gergerlioglu
+# Original script: https://github.com/erdmgrgrlioglu/dmenu-nmcli
+# Inspired by: dmenu-bluetooth (https://github.com/Layerex/dmenu-bluetooth)
+#
+# A dmenu generator script for NetworkManager command line interface. (in bash!)
+#
+# Depends on:
+#   dmenu (patches: +password, +center), NetworkManager (contains nmcli, nmtui),
+#   st, dunst, Hack Nerd Font
+#
+#   Feel free to remove the parts you dont use.
+
+color0=$(xrdb -query | grep "\*color0" | awk '{print $2}')                          # uses xresources
+color5=$(xrdb -query | grep "\*color5" | awk '{print $2}')                          #
+color7=$(xrdb -query | grep "\*color7" | awk '{print $2}')                          #
+MENU=(dmenu -i -c -l 20 -nb "$color0" -nf "$color7" -sb "$color5" -sf "$color7" -p) # uses dmenu
+TERMINAL="st"                                                                       # uses st
+NOTIFY=(notify-send -i " ")                                                         # uses dunst
+
+# networking
+networking_on() {
+    nmcli networking | grep -F -q "enabled" && return 0 || return 1
+}
+
+toggle_networking() {
+    if networking_on; then
+        nmcli networking off 2>/dev/null
+    else
+        nmcli networking on 2>/dev/null
+    fi
+    "${NOTIFY[@]}" "󱘖 Networking: $(nmcli networking) "
+    show_menu
+}
+
+get_devices() {
+    nmcli -f type,device,state,connection device status | tail -n +2
+}
+
+# $1=type
+get_connections() {
+    set -o pipefail
+    nmcli -f type,active,name connection show | grep -w "$1" | awk '{$1="    "; if ($2 == "yes") $2="*";  else $2=" ";  print $0}' || echo "No Avaliable Connection For Device."
+    set +o pipefail
+}
+
+# wifi
+# $1=device
+wifi_scan() {
+    nmcli device wifi rescan && sleep 1 && nmcli -f bars,in-use,ssid device wifi list ifname "$1" | awk '{if ($2 == "*") $2="*";  else $2="  "$2; print $0}' | tail -n +2
+}
+
+# $1=connection name
+connect() {
+    if [[ "$1" != "--" ]]; then # null check
+        if nmcli connection show --active | grep -Fqw "$1"; then
+            nmcli connection down id "$1" && "${NOTIFY[@]}" "󱘖 $1 Disconnected"
+            show_menu
+        else
+            "${NOTIFY[@]}" " $1 Connecting"
+            if $TERMINAL nmcli --ask -c yes connection up "$1" 2>/dev/null; then
+                case "$type" in
+                "wifi") "${NOTIFY[@]}" " $1 Connected" ;;
+                "ethernet") "${NOTIFY[@]}" "󰈀 $1 Connected" ;;
+                *) "${NOTIFY[@]}" " $1 Connected" ;;
+                esac
+                show_menu
+            elif [[ "$type" == "wifi" ]] && $TERMINAL nmcli --ask -c yes device wifi connect "$1" 2>/dev/null; then
+                "${NOTIFY[@]}" " $1 Connected"
+                show_menu
+            else
+                "${NOTIFY[@]}" "󱘖 $1 Connection Failed"
+                device_menu
+            fi
+        fi
+    else
+        device_menu
+    fi
+}
+
+# editor
+launch_connection_editor() {
+    $TERMINAL nmtui
+}
+
+# menu
+show_menu() {
+    if networking_on; then options="Networking: on\n\n$(get_devices)\n"; else options="Networking: off"; fi
+
+    choice="$(echo -e "$options\nLaunch Connection Editor\nExit" | "${MENU[@]}" "Networking")"
+
+    type="$(echo "$choice" | awk '{print $1}')"
+    device="$(echo "$choice" | awk '{print $2}')"
+
+    case $choice in
+    "" | "Exit") exit 0 ;;
+    "Networking: on" | "Networking: off") toggle_networking ;;
+    "Launch Connection Editor") launch_connection_editor ;;
+    *) device_menu ;;
+    esac
+}
+
+device_menu() {
+    case "$type" in
+    "wifi") options="\nScan\n\n$(wifi_scan "$device")\n" ;;
+    *) options="" ;;
+    esac
+
+    choice="$(echo -e "Back\n$options\n$(get_connections "$type")\n\nLaunch Connection Editor\nExit" | "${MENU[@]}" "$type")"
+
+    case $choice in
+    "" | "Exit") exit 0 ;;
+    "Back") show_menu ;;
+    "Scan") device_menu ;;
+    "Launch Connection Editor") launch_connection_editor ;;
+    *) connect "$(echo "$choice" | awk '{print substr($0,8)}')" ;;
+    esac
+}
+
+show_menu
